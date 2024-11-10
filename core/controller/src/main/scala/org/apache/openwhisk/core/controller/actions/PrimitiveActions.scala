@@ -18,15 +18,15 @@
 package org.apache.openwhisk.core.controller.actions
 
 import java.time.{Clock, Instant}
-
 import akka.actor.ActorSystem
 import akka.event.Logging.InfoLevel
 import spray.json.DefaultJsonProtocol._
 import spray.json._
+import spray.json.{JsObject, JsValue}
 import org.apache.openwhisk.common.tracing.WhiskTracerProvider
 import org.apache.openwhisk.common.{Logging, LoggingMarkers, TransactionId, UserEvents}
 import org.apache.openwhisk.core.connector.{ActivationMessage, EventMessage, MessagingProvider}
-import org.apache.openwhisk.core.controller.WhiskServices
+import org.apache.openwhisk.core.controller.{ProjectionDSL, WhiskServices}
 import org.apache.openwhisk.core.database.{ActivationStore, NoDocumentException, UserContext}
 import org.apache.openwhisk.core.entitlement.{Resource, _}
 import org.apache.openwhisk.core.entity.ActivationResponse.ERROR_FIELD
@@ -86,6 +86,275 @@ protected[actions] trait PrimitiveActions {
     topmost: Boolean,
     atomicActionsCount: Int)(implicit transid: TransactionId): Future[(Either[ActivationId, WhiskActivation], Int)]
 
+  protected[controller] def invokeAction(
+                                          user: Identity,
+                                          action: WhiskActionMetaData,
+                                          payload: Option[JsObject],
+                                          waitForResponse: Option[FiniteDuration],
+                                          cause: Option[ActivationId])(implicit transid: TransactionId): Future[Either[ActivationId, WhiskActivation]]
+
+  protected[actions] def invokeApp(
+                                    user: Identity,
+                                    action: WhiskActionMetaData,
+                                    payload: Option[JsObject],
+                                    waitForResponse: Option[FiniteDuration],
+                                    cause: Option[ActivationId])(implicit transid: TransactionId): Future[Either[ActivationId, WhiskActivation]] = {
+    System.out.println (s"invoke app")
+
+    var JsObject(payloadMap) = payload.getOrElse(JsObject.empty)
+    var newPayload  = JsObject.empty
+    var nextAction = JsString.empty
+    if (payloadMap contains "action") {
+      nextAction = (payloadMap getOrElse ("action", JsObject.empty)).asInstanceOf[JsString]
+    }
+    else {
+      throw new Exception("No next action available", None.orNull)
+    }
+    if(payloadMap contains("input")){
+      // newPayload = (payloadMap getOrElse ("input", JsObject.empty)).asJsObject
+      val inputEntry: Option[JsValue] = payloadMap.get("input")
+
+      // Construct a JsObject with the "input" key if it exists
+      newPayload = inputEntry match {
+        case Some(value) => JsObject("input" -> value)
+        case None => JsObject()
+      }
+    }
+    else {
+      throw new Exception("No input to the action", None.orNull)
+    }
+    System.out.println (s"invokeApp: nextAction is $nextAction, input is $newPayload")
+    var nextActionVector: Vector[JsValue] = Vector[JsValue](nextAction)
+    nextActionVector = nextAction +: nextActionVector
+    val components: Vector[FullyQualifiedEntityName] = nextActionVector map (FullyQualifiedEntityName.serdes.read(_))
+
+    val next = components (0).fullPath
+    // resolve and invoke next action
+    val fqn = (if (next.defaultPackage) EntityPath.DEFAULT.addPath(next) else next)
+      .resolveNamespace(user.namespace)
+      .toFullyQualifiedEntityName
+    val resource = Resource(fqn.path, Collection(Collection.ACTIONS), Some(fqn.name.asString))
+    entitlementProvider
+      .check(user, Privilege.ACTIVATE, Set(resource), noThrottle = true)
+      .flatMap { _ =>
+        // successful entitlement check
+        WhiskActionMetaData
+          .resolveActionAndMergeParameters(entityStore, fqn)
+          .flatMap {
+            case next =>
+              // successful resolution
+              invokeAction(user, next, Option(newPayload), waitForResponse, cause)
+          }
+        //~ .recover {
+        //~ case _ =>
+        //~ // resolution failure
+        //~ ActivationResponse.applicationError(compositionComponentNotFound(next.asString))
+        //~ }
+      }
+    //~ .recover {
+    //~ case _ =>
+    //~ // failed entitlement check
+    //~ ActivationResponse.applicationError(compositionComponentNotAccessible(next.asString))
+    //~ }
+  }
+
+  protected[actions] def invokeFork(
+                                     user: Identity,
+                                     action: WhiskActionMetaData,
+                                     payload: Option[JsObject],
+                                     waitForResponse: Option[FiniteDuration],
+                                     cause: Option[ActivationId])(implicit transid: TransactionId): Future[Either[ActivationId, WhiskActivation]] = {
+    System.out.println (s"invoke fork")
+    /*var JsObject(map) = payload.getOrElse(JsObject.empty)
+    //var newPayloadMap : Map [String, JsValue]
+    if (map contains "input" && map contains "saved") {
+
+    }
+    if (map contains "output" && map contains "saved") {
+      //Output from a previous projection invocation
+
+    }
+    else if (!map contains "output" && !map contains "saved") {
+      //Input to first action of projection
+
+    }*/
+
+    val ForkExecMetaData(components) = action.exec
+    System.out.println (s"components is $components")
+    System.out.println (s"invokeFork: given payload is $payload")
+
+    val JsObject(payloadMap) = payload.getOrElse(JsObject.empty)
+    var newPayload  = JsObject.empty
+    if ((payloadMap contains "input") && (payloadMap contains "saved")) {
+      // newPayload = (payloadMap getOrElse ("input", JsObject.empty))
+      val inputEntry: Option[JsValue] = payloadMap.get("input")
+
+      // Construct a JsObject with the "input" key if it exists
+      newPayload = inputEntry match {
+        case Some(value) => JsObject("input" -> value)
+        case None => JsObject()
+      }
+    }
+    else {
+      newPayload = payload.getOrElse (JsObject.empty)
+    }
+
+    System.out.println (s"invokeFork: new payload is $newPayload")
+    val next = components (0).fullPath
+    // resolve and invoke next action
+    val fqn = (if (next.defaultPackage) EntityPath.DEFAULT.addPath(next) else next)
+      .resolveNamespace(user.namespace)
+      .toFullyQualifiedEntityName
+    val resource = Resource(fqn.path, Collection(Collection.ACTIONS), Some(fqn.name.asString))
+    entitlementProvider
+      .check(user, Privilege.ACTIVATE, Set(resource), noThrottle = true)
+      .flatMap { _ =>
+        // successful entitlement check
+        WhiskActionMetaData
+          .resolveActionAndMergeParameters(entityStore, fqn)
+          .flatMap {
+            case next =>
+              // successful resolution
+              val response = invokeAction(user, next, Option(newPayload), waitForResponse, cause)
+              response.map {
+                case Right (activation) => {
+                  val WhiskActivation (_ns, _name, _subject, _id, _start, _end, _cause,
+                  _response, _logs, _version, _publish, _ann, _duration) = activation
+
+                  var newResponseJSON = JsObject.empty
+                  var result = _response
+
+                  val outputPayload = _response.result.map(_.asJsObject)
+                  val payloadContent = outputPayload getOrElse JsObject.empty
+                  val errorField = payloadContent.fields.get(ActivationResponse.ERROR_FIELD)
+
+                  if (errorField.isEmpty) {
+                    val ActivationResponse (statusCode, responseJsObject, size) = _response
+                    System.out.println(s"invokeFork: responseJsObject = $responseJsObject")
+                    var newResponseMap  = Map[String, JsValue] ()
+                    newResponseMap += ("output" -> responseJsObject.getOrElse(JsObject.empty))
+                    newResponseMap += ("saved" -> payloadMap.getOrElse ("saved", JsObject.empty))
+                    newResponseJSON = JsObject(newResponseMap)
+                    result = ActivationResponse.success (Option(newResponseJSON))
+                  } else {
+                    assert(errorField.isDefined)
+                  }
+
+                  System.out.println(s"invokeFork: result $result")
+                  val newActivation = WhiskActivation(namespace = _ns,
+                    name = _name,
+                    subject = _subject,
+                    activationId = _id,
+                    start = _start,
+                    end = _end,
+                    cause = _cause,
+                    response = result,
+                    logs = _logs,
+                    version = _version,
+                    publish = _publish,
+                    annotations = _ann,
+                    duration = _duration)
+
+                  Right(newActivation)
+                }
+                case somethingelse => somethingelse
+              }
+          }
+        //~ .recover {
+        //~ case _ =>
+        //~ // resolution failure
+        //~ ActivationResponse.applicationError(compositionComponentNotFound(next.asString))
+        //~ }
+      }
+    //~ .recover {
+    //~ case _ =>
+    //~ // failed entitlement check
+    //~ ActivationResponse.applicationError(compositionComponentNotAccessible(next.asString))
+    //~ }
+  }
+
+  protected[actions] def invokeProjection(
+                                           user: Identity,
+                                           action: WhiskActionMetaData,
+                                           payload: Option[JsObject],
+                                           waitForResponse: Option[FiniteDuration],
+                                           cause: Option[ActivationId])(implicit transid: TransactionId): Future[Either[ActivationId, WhiskActivation]] = {
+
+    val context = UserContext(user)
+
+    val start = Instant.now(Clock.systemUTC())
+    System.out.println (s"invoke projection")
+    val JsObject(map) = payload.getOrElse(JsObject.empty)
+    var newMap = Map [String, JsValue] ()
+    //if (map contains "input" && map contains "saved") {
+    //Should Not happen
+    //  logging.info (s"projection $action 's input contains input field")
+    //}
+
+    if ((map contains "output") && (map contains "saved")) {
+      //Output from a previous projection invocation
+      newMap += ("input" -> map("output"))
+      newMap += ("saved" -> map("saved"))
+    }
+    else if (! (map contains "output") && (map contains "input")) {
+      //Input to first action of projection
+      newMap = map
+    } else {
+      throw new IllegalArgumentException (s"Incorrect given payload $payload")
+    }
+
+    var updatedPayload = JsObject(newMap)
+    val ProjectionExecMetaData(code) = action.exec
+    System.out.println (s"invokeProjection:281 code is $code")
+    System.out.println (s"invokeProjection:282 updatedPayload is $updatedPayload")
+    val dslResult = (new ProjectionDSL).apply(code, updatedPayload)
+    //newMap = newMap + ("input" -> dslResult)
+    //updatedPayload = dslResult
+    System.out.println (s"invokeProjection:284 dslResult: $dslResult for code $code and payload ${updatedPayload}")
+    val end = Instant.now(Clock.systemUTC())
+
+    // create the whisk activation
+    val activation = WhiskActivation(
+      namespace = user.namespace.name.toPath,
+      name = action.name,
+      user.subject,
+      activationId = activationIdFactory.make(),
+      start = start,
+      end = end,
+      cause = cause,
+      response = ActivationResponse.success(Option(dslResult)),
+      version = action.version,
+      publish = false,
+      //~ annotations = Parameters(WhiskActivation.topmostAnnotation, JsBoolean(session.cause.isEmpty)) ++
+      //~ Parameters(WhiskActivation.pathAnnotation, JsString(session.action.fullyQualifiedName(false).asString)) ++
+      //~ Parameters(WhiskActivation.kindAnnotation, JsString(Exec.SEQUENCE)) ++
+      //~ Parameters(WhiskActivation.conductorAnnotation, JsBoolean(true)) ++
+      //~ causedBy ++
+      //~ sequenceLimits,
+      duration = Some(end.getEpochSecond() - start.getEpochSecond()))
+
+    if (UserEvents.enabled) {
+      EventMessage.from(activation, s"recording activation '${activation.activationId}'", user.namespace.uuid) match {
+        case Success(msg) => UserEvents.send(producer, msg)
+        case Failure(t)   => logging.warn(this, s"activation event was not sent: $t")
+      }
+    }
+//    activationStore.storeAfterCheck(activation, context)(transid, notifier = None)
+    activationStore.storeAfterCheck(activation, false, None, None, context)(transid, notifier = None, logging)
+
+    Future.successful (Right(activation))
+
+    //~ .recover {
+    //~ case _ =>
+    //~ // resolution failure
+    //~ ActivationResponse.applicationError(compositionComponentNotFound(next.asString))
+    //~ }
+    //~ .recover {
+    //~ case _ =>
+    //~ // failed entitlement check
+    //~ ActivationResponse.applicationError(compositionComponentNotAccessible(next.asString))
+    //~ }
+  }
   /**
    * A method that knows how to invoke a single primitive action or a composition.
    *

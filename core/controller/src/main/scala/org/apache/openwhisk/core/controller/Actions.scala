@@ -285,7 +285,7 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
                        result: Boolean)(implicit transid: TransactionId): RequestContext => Future[RouteResult] = {
     val waitForResponse = if (blocking) Some(waitOverride) else None
     onComplete(invokeAction(user, actionWithMergedParams, payload, waitForResponse, cause = None)) {
-      case Success(Left(activationId)) =>
+      case Success(Left(activationId: ActivationId)) =>
         // non-blocking invoke or blocking invoke which got queued instead
         respondWithActivationIdHeader(activationId) {
           complete(Accepted, activationId.toJsObject)
@@ -466,6 +466,10 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
     val parameters = exec match {
       case seq: SequenceExec =>
         Parameters("_actions", JsArray(seq.components map { _.qualifiedNameWithLeadingSlash.toJson }))
+      case seq: ForkExec =>
+        Parameters("_actions", JsArray(seq.components map { c =>
+          JsString("/" + c.toString)
+        }))
       case _ => content.parameters getOrElse Parameters()
     }
 
@@ -577,12 +581,14 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
         content.parameters getOrElse {
           action.exec match {
             case seq: SequenceExec => Parameters()
+            case seq: ForkExec => Parameters()
             case _                 => action.parameters
           }
         }
     } getOrElse {
       action.exec match {
         case seq: SequenceExec => action.parameters // discard content.parameters
+        case seq: ForkExec => action.parameters
         case _                 => content.parameters getOrElse action.parameters
       }
     }

@@ -228,6 +228,71 @@ protected[core] case class SequenceExecMetaData(components: Vector[FullyQualifie
   override def size = components.map(_.size).reduceOption(_ + _).getOrElse(0.B)
 }
 
+protected[core] case class ProjectionExecMetaData(code: String) extends ExecMetaDataBase {
+  override val kind = ExecMetaDataBase.PROJECTION
+  override val deprecated = false
+  //override def size = action.size
+  override def size = code.sizeInBytes
+}
+
+protected[core] case class ProjectionExec (code: String) extends Exec {
+  override val kind = Exec.PROJECTION
+  override val deprecated = false
+  //override def size = action.size
+  override def size = code.sizeInBytes
+}
+
+protected[core] case class ProgramExecMetaData (components: Vector[FullyQualifiedEntityName]) extends ExecMetaDataBase {
+  override val kind = ExecMetaDataBase.PROGRAM
+  override val deprecated = false
+  override def size = components.map(_.size).reduceOption(_ + _).getOrElse(0.B)
+}
+
+protected[core] case class ProgramExec(components: Vector[FullyQualifiedEntityName]) extends Exec {
+  override val kind = Exec.PROGRAM
+  override val deprecated = false
+  override def size = components.map(_.size).reduceOption(_ + _).getOrElse(0.B)
+}
+
+protected[core] case class AppExecMetaData() extends ExecMetaDataBase {
+  override val kind = ExecMetaDataBase.APP
+  override val deprecated = true
+  override def size = 0.B
+}
+
+protected[core] case class AppExec () extends Exec {
+  override val kind = Exec.APP
+  override val deprecated = true
+  override def size = 0.B
+}
+
+protected[core] case class ForkExecMetaData(components: Vector[FullyQualifiedEntityName]) extends ExecMetaDataBase {
+  override val kind = ExecMetaDataBase.FORK
+  override val deprecated = false
+  //override def size = action.size
+  override def size = components.map(_.size).reduceOption(_ + _).getOrElse(0.B)
+}
+
+protected[core] case class ForkExec (components: Vector[FullyQualifiedEntityName]) extends Exec {
+  override val kind = Exec.FORK
+  override val deprecated = false
+  //override def size = action.size
+  override def size = components.map(_.size).reduceOption(_ + _).getOrElse(0.B)
+}
+
+protected[core] case class DagularExecMetaData(code: String) extends ExecMetaDataBase {
+  override val kind = ExecMetaDataBase.DAGULAR
+  override val deprecated = false
+  override def size = 0.B // not sure how this should be measured
+}
+
+protected[core] case class DagularExec (code: String) extends Exec {
+  override val kind = Exec.DAGULAR
+  override val deprecated = false
+  override def size = 0.B // not sure how this should be measured
+}
+
+
 object Exec extends ArgNormalizer[Exec] with DefaultJsonProtocol {
 
   val maxSize: ByteSize = 48.MB
@@ -242,6 +307,12 @@ object Exec extends ArgNormalizer[Exec] with DefaultJsonProtocol {
   // - Black Box because it is a type marker
   protected[core] val SEQUENCE = "sequence"
   protected[core] val BLACKBOX = "blackbox"
+  protected[core] val PROJECTION = "projection"
+  protected[core] val PROGRAM = "program"
+  protected[core] val FORK = "fork"
+  protected[core] val APP = "app"
+  protected[core] val DAGULAR = "dagular"
+
 
   // This is for error cases where the action `kind` may not be known.
   protected[core] val UNKNOWN = "unknown"
@@ -266,6 +337,24 @@ object Exec extends ArgNormalizer[Exec] with DefaultJsonProtocol {
 
       case s @ SequenceExec(comp) =>
         JsObject("kind" -> JsString(s.kind), "components" -> comp.map(_.qualifiedNameWithLeadingSlash).toJson)
+
+      case s @ ProgramExec(comp) => {
+        System.out.println (s"ProgramExec components $comp")
+        JsObject("kind" -> JsString(s.kind), "components" -> comp.map(_.qualifiedNameWithLeadingSlash).toJson)
+      }
+
+      case p @ ProjectionExec(code) =>
+        JsObject("kind" -> JsString(p.kind), "code" -> JsString(code))
+      //"action" -> action.qualifiedNameWithLeadingSlash.toJson,
+
+      case f @ ForkExec(comp) =>
+        JsObject("kind" -> JsString(f.kind), "components" -> comp.map(_.qualifiedNameWithLeadingSlash).toJson)
+
+      case a @ AppExec() =>
+        JsObject("kind" -> JsString(a.kind))
+
+      case d @ DagularExec (code) =>
+        JsObject("kind" -> JsString(d.kind), "code" -> JsString(code))
 
       case b: BlackBoxExec =>
         val base =
@@ -304,6 +393,41 @@ object Exec extends ArgNormalizer[Exec] with DefaultJsonProtocol {
             case None                      => throw new DeserializationException(s"'components' must be defined for sequence kind")
           }
           SequenceExec(comp)
+        case Exec.PROGRAM =>
+          val comp: Vector[FullyQualifiedEntityName] = obj.fields.get("components") match {
+            case Some(JsArray(components)) => components map (FullyQualifiedEntityName.serdes.read(_))
+            case Some(_)                   => throw new DeserializationException(s"'components' must be an array")
+            case None                      => throw new DeserializationException(s"'components' must be defined for sequence kind")
+          }
+          ProgramExec(comp)
+
+        case Exec.PROJECTION =>
+          //val action: FullyQualifiedEntityName = FullyQualifiedEntityName.serdes.read (obj.fields.get("action").getOrElse (JsObject.empty))
+          val schemaCode : String = obj.fields.get("code") match {
+            case Some(JsString(t)) => t
+            case Some(m) => throw new DeserializationException(s"'schema code must be string found $m")
+            case None => "."
+          }
+          ProjectionExec(schemaCode)
+
+        case Exec.FORK =>
+          val comp: Vector[FullyQualifiedEntityName] = obj.fields.get("components") match {
+            case Some(JsArray(components)) => components map (FullyQualifiedEntityName.serdes.read(_))
+            case Some(_)                   => throw new DeserializationException(s"'components' must be an array")
+            case None                      => throw new DeserializationException(s"'components' must be defined for sequence kind")
+          }
+          ForkExec (comp)
+
+        case Exec.APP =>
+          AppExec()
+
+        case Exec.DAGULAR =>
+          val code : String = obj.fields.get("code") match {
+            case Some(JsString(t)) => t
+            case Some(m) => throw new DeserializationException(s"'dagular prog must be string found $m")
+            case None => ""
+          }
+          DagularExec(code)
 
         case Exec.BLACKBOX =>
           val image: ImageName = obj.fields.get("image") match {
@@ -379,6 +503,12 @@ protected[core] object ExecMetaDataBase extends ArgNormalizer[ExecMetaDataBase] 
   // - Black Box because it is a type marker
   protected[core] val SEQUENCE = "sequence"
   protected[core] val BLACKBOX = "blackbox"
+  protected[core] val PROJECTION = "projection"
+  protected[core] val PROGRAM = "program"
+  protected[core] val FORK = "fork"
+  protected[core] val APP = "app"
+  protected[core] val DAGULAR = "dagular"
+
 
   private def execManifests = ExecManifest.runtimesManifest
 
@@ -400,6 +530,21 @@ protected[core] object ExecMetaDataBase extends ArgNormalizer[ExecMetaDataBase] 
 
       case s @ SequenceExecMetaData(comp) =>
         JsObject("kind" -> JsString(s.kind), "components" -> comp.map(_.qualifiedNameWithLeadingSlash).toJson)
+
+      case s @ ProgramExecMetaData(comp) =>
+        JsObject("kind" -> JsString(s.kind), "components" -> comp.map(_.qualifiedNameWithLeadingSlash).toJson)
+
+      case p @ ProjectionExecMetaData(code) =>
+        JsObject("kind" -> JsString(p.kind), //"action" -> action.qualifiedNameWithLeadingSlash.toJson,
+          "code" -> JsString(code))
+      case f @ ForkExecMetaData (comp) =>
+        JsObject("kind" -> JsString(f.kind), "components" -> comp.map(_.qualifiedNameWithLeadingSlash).toJson)
+      case a @ AppExecMetaData () =>
+        JsObject("kind" -> JsString(a.kind))
+
+      case p @ DagularExecMetaData (code) =>
+        JsObject("kind" -> JsString(p.kind),
+          "code" -> JsString(code))
 
       case b: BlackBoxExecMetaData =>
         val base =
@@ -441,6 +586,49 @@ protected[core] object ExecMetaDataBase extends ArgNormalizer[ExecMetaDataBase] 
             case None                      => throw new DeserializationException(s"'components' must be defined for sequence kind")
           }
           SequenceExecMetaData(comp)
+        case ExecMetaDataBase.PROGRAM =>
+          val comp: Vector[FullyQualifiedEntityName] = obj.fields.get("components") match {
+            case Some(JsArray(components)) => components map (FullyQualifiedEntityName.serdes.read(_))
+            case Some(_)                   => throw new DeserializationException(s"'components' must be an array")
+            case None                      => throw new DeserializationException(s"'components' must be defined for sequence kind")
+          }
+          ProgramExecMetaData(comp)
+
+        case ExecMetaDataBase.PROJECTION =>
+          //val action: FullyQualifiedEntityName = FullyQualifiedEntityName.serdes.read (obj.fields.get("action").getOrElse (JsObject.empty))
+          //val comp: Vector[FullyQualifiedEntityName] = obj.fields.get("components") match {
+          //  case Some(JsArray(components)) => components map (FullyQualifiedEntityName.serdes.read(_))
+          //  case Some(_)                   => throw new DeserializationException(s"'components' must be an array")
+          //  case None                      => throw new DeserializationException(s"'components' must be defined for sequence kind")
+          //}
+          val schemaCode : String = obj.fields.get("code") match {
+            case Some(JsString(i)) => i
+            case Some(m) => throw new DeserializationException(s"'schema code must be string found $m")
+            case None => "."
+          }
+
+          ProjectionExecMetaData(schemaCode)
+
+        case ExecMetaDataBase.FORK =>
+          val comp: Vector[FullyQualifiedEntityName] = obj.fields.get("components") match {
+            case Some(JsArray(components)) => components map (FullyQualifiedEntityName.serdes.read(_))
+            case Some(_)                   => throw new DeserializationException(s"'components' must be an array")
+            case None                      => throw new DeserializationException(s"'components' must be defined for sequence kind")
+          }
+
+          ForkExecMetaData (comp)
+
+        case ExecMetaDataBase.APP =>
+          AppExecMetaData ()
+
+        case ExecMetaDataBase.DAGULAR =>
+          val code : String = obj.fields.get("code") match {
+            case Some(JsString(i)) => i
+            case Some(m) => throw new DeserializationException(s"'dagular prog must be string found $m")
+            case None => ""
+          }
+
+          DagularExecMetaData(code)
 
         case ExecMetaDataBase.BLACKBOX =>
           val image: ImageName = obj.fields.get("image") match {

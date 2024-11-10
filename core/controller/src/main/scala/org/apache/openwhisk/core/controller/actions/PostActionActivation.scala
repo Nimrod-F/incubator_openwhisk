@@ -30,7 +30,7 @@ import org.apache.openwhisk.core.controller.WhiskServices
 import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.http.Messages
 
-protected[core] trait PostActionActivation extends PrimitiveActions with SequenceActions {
+protected[core] trait PostActionActivation extends PrimitiveActions with SequenceActions with DagularActions {
   /** The core collections require backend services to be injected in this trait. */
   services: WhiskServices =>
 
@@ -47,10 +47,36 @@ protected[core] trait PostActionActivation extends PrimitiveActions with Sequenc
   protected[controller] def invokeAction(
     user: Identity,
     action: WhiskActionMetaData,
-    payload: Option[JsValue],
+    payload: Option[JsObject],
     waitForResponse: Option[FiniteDuration],
     cause: Option[ActivationId])(implicit transid: TransactionId): Future[Either[ActivationId, WhiskActivation]] = {
     action.toExecutableWhiskAction match {
+      case None if action.exec.isInstanceOf[ProgramExecMetaData] =>
+        System.out.println ("PostActionActivation: invokeProgram")
+        val ProgramExecMetaData(components) = action.exec
+        invokeProgram(user, action, components, payload, waitForResponse, cause, topmost = true, 0).map(r => r._1)
+      case None if action.exec.isInstanceOf[AppExecMetaData] =>
+        System.out.println ("PostActionActivation: invokeApp")
+        invokeApp(user, action, payload, waitForResponse, cause)
+      case None if action.exec.isInstanceOf[ProjectionExecMetaData] =>
+        System.out.println ("PostActionActivation: invokeProjection")
+        val ProjectionExecMetaData(code) = action.exec
+        System.out.println ("After ProjectionExecMetaData")
+        System.out.println ("Code is $code")
+        invokeProjection(user, action, payload, waitForResponse, cause)
+      case None if action.exec.isInstanceOf[ForkExecMetaData] =>
+        System.out.println (s"PostActionActivation: invokeFork")
+        val ForkExecMetaData(components) = action.exec
+        System.out.println (s"After ProjectionExecMetaData")
+        System.out.println (s"Components are $components")
+        invokeFork(user, action, payload, waitForResponse, cause)
+
+      case None if action.exec.isInstanceOf[DagularExecMetaData] =>
+        System.out.println (s"PostActionActivation: invokeDagular")
+        val DagularExecMetaData(components) = action.exec
+        System.out.println (s"After DagularExecMetaData")
+        System.out.println (s"Components are $components")
+        invokeDagular(user, action, payload, waitForResponse, cause)
       // this is a topmost sequence
       case None =>
         val SequenceExecMetaData(components) = action.exec
