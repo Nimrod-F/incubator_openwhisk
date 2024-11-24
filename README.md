@@ -64,7 +64,7 @@ typically served from http://localhost:3232. The Playground allows you create an
 
 - To make use of all OpenWhisk features, you will need the OpenWhisk command line tool called
 `wsk` which you can download from https://s.apache.org/openwhisk-cli-download.
-Please refer to the [CLI configuration](./docs/cli.md) for additional details. Typically you
+Please refer to the [CLI configuration](./docs/cli.md) forF additional details. Typically you
 configure the CLI for Standalone OpenWhisk as follows:
 ```
 wsk property set \

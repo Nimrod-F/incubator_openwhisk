@@ -93,7 +93,7 @@ protected[actions] trait DagularActions {
           case Failure(t)   => logging.warn(this, s"activation event was not sent: $t")
         }
       }
-//      activationStore.storeAfterCheck(activation, context)(transid, notifier = None)
+      //      activationStore.storeAfterCheck(activation, context)(transid, notifier = None)
       activationStore.storeAfterCheck(activation, false, None, None, context)(transid, notifier = None, logging)
       Right(activation)
     }
@@ -160,7 +160,7 @@ protected[actions] trait DagularActions {
           DagularNode(data, children)
         }
       }
-      System.out.println("data: " + data);
+
       // parse args and check arg counts
       data match {
         case "id" => { // [string]
@@ -200,8 +200,6 @@ protected[actions] trait DagularActions {
         }
 
         case "if_expr" => { // [cond_expr, true_expr, false_expr]
-          System.out.println("if_expr : " + data);
-          System.out.println("if_expr : " + children);
           needs_children(data, 3, children map jsonToDagularAST)
         }
 
@@ -242,13 +240,13 @@ protected[actions] trait DagularActions {
 
         case "invocation" => { // [function name, argument]
           // it would be convenient to resolve functions at this location
-//          if (children.length != 3)
-//            throw new IllegalArgumentException (s"dagular parse found ${children.length} children in ${data}: expected 3")
-//          else {
+          if (children.length != 3)
+            throw new IllegalArgumentException (s"dagular parse found ${children.length} children in ${data}: expected 3")
+          else {
             val func_name = DagularLeaf(children(0))
             val argument = jsonToDagularAST(children(1))
             DagularNode(data, Vector(func_name, argument))
-//          }
+          }
         }
 
         case s => {
@@ -594,26 +592,21 @@ protected[actions] trait DagularActions {
             case "block_expr" => { // [assign1, assign2, ..., return]
               // interpret series of assignments
 
-              val new_env = children.dropRight(1).foldLeft(env)({ (env, node) =>
-                node match {
-                  case DagularNode("assign", assign_children) => {
-                    // Extract the identifier from the nested id node
-                    val DagularNode("id", Vector(DagularLeaf(JsString(id)))) = assign_children(0)
-                    // Get the expression to evaluate
-                    val expr = assign_children(1)
-                    // Add to environment with evaluated expression
-                    env + (id -> interpretDagular(expr, env))
-                  }
-                  case DagularNode(s, _) =>
-                    throw new IllegalArgumentException(s"dagular interpret found $s inside block")
-                }
-              })
+              val new_env = children.dropRight(1).foldRight(env)({(node, env) => node match {
+                case DagularNode("assign", assign_children) => // [leaf, expr]
+                  val DagularLeaf(JsString(id)) = assign_children(0)
+                  env + (id -> interpretDagular(assign_children(1), env))
+
+                case DagularNode(s, _) =>
+                  throw new IllegalArgumentException (s"dagular interpret found $s inside block")
+              }})
 
               children.takeRight(1)(0) match {
                 case DagularNode("return", ret_children) => // [expr]
                   interpretDagular(ret_children(0), new_env)
+
                 case DagularNode(s, _) =>
-                  throw new IllegalArgumentException(s"dagular interpret found non-return $s at block end")
+                  throw new IllegalArgumentException (s"dagular interpret found non-return $s at block end")
               }
             }
 
