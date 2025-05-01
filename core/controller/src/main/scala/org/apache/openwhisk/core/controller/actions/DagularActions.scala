@@ -304,18 +304,16 @@ protected[actions] trait DagularActions {
             case "dict" => { // [pair1, pair2, ...]
               val pairs = children.map({ child =>
                 // get pair contents
-                val DagularNode(data, pair) = child
+                val DagularNode("pair", pairChildren) = child
 
-                // make sure it really is a pair
-                if (data != "pair") {
-                  throw new IllegalArgumentException (s"dagular interpret found non-pair in dict expr")
-                }
+                val keyNode = pairChildren(0) // first child of pair (key)
+                val valueNode = pairChildren(1) // second child of pair (value)
 
-                // disassemble the pair
-                val DagularNode(_, idnode) = pair(0)
-                val DagularLeaf(JsString(id)) = idnode(0) // string
-                val value = interpretDagular(idnode(1), env) // expr
+                // Interpret key
+                val DagularNode("id", Vector(DagularLeaf(JsString(id)))) = keyNode
 
+                // Interpret value
+                val value = interpretDagular(valueNode, env)
                 // get the pair as (string, future)
                 (id, value)
               })
@@ -532,6 +530,10 @@ protected[actions] trait DagularActions {
             }
 
             case "invocation" => { // [function name, argument]
+              if (children.length < 2) {
+                throw new IllegalArgumentException("Dagular invocation requires both function name and argument")
+              }
+
               val DagularLeaf(JsString(func_name)) = children(0)
               val arg = interpretDagular(children(1), env)
 
@@ -591,23 +593,19 @@ protected[actions] trait DagularActions {
               }
             }
 
-            case "block_expr" => { // [assign1, assign2, ..., return]
+            case "block_expr" =>  { // [assign1, assign2, ..., return]
               // interpret series of assignments
 
-              val new_env = children.dropRight(1).foldLeft(env)({ (env, node) =>
-                node match {
-                  case DagularNode("assign", assign_children) => {
-                    // Extract the identifier from the nested id node
-                    val DagularNode("id", Vector(DagularLeaf(JsString(id)))) = assign_children(0)
-                    // Get the expression to evaluate
-                    val expr = assign_children(1)
-                    // Add to environment with evaluated expression
-                    env + (id -> interpretDagular(expr, env))
-                  }
-                  case DagularNode(s, _) =>
-                    throw new IllegalArgumentException(s"dagular interpret found $s inside block")
-                }
-              })
+              val new_env = children.dropRight(1).foldRight(env)({(node, env) => node match {
+                case DagularNode("assign", assign_children) =>  // [leaf, expr]
+                  val DagularLeaf(JsString(id)) = assign_children(0)
+                  env + (id -> interpretDagular(assign_children(1), env))
+
+                  case DagularNode(s, _)
+                  =>
+                  throw new IllegalArgumentException(s"dagular interpret found $s inside block")
+
+              }})
 
               children.takeRight(1)(0) match {
                 case DagularNode("return", ret_children) => // [expr]
