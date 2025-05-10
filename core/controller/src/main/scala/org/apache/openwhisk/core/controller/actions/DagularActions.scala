@@ -61,14 +61,14 @@ protected[actions] trait DagularActions {
 
     val start = Instant.now(Clock.systemUTC())
 
-    System.out.println (s"invoke dagular")
+    System.out.println(s"invoke dagular")
     val DagularExecMetaData(code) = action.exec
-    System.out.println (s"invokeDagular: program is $code")
+    System.out.println(s"invokeDagular: program is $code")
 
     // run dagular program
     val input = payload.getOrElse(JsObject.empty)
     val result = new DagularDSL(user, cause)(transid)(code, input)
-    System.out.println (s"invokeDagular: result: $result for code $code and payload $input")
+    System.out.println(s"invokeDagular: result: $result for code $code and payload $input")
 
     val end = Instant.now(Clock.systemUTC())
 
@@ -90,10 +90,10 @@ protected[actions] trait DagularActions {
       if (UserEvents.enabled) {
         EventMessage.from(activation, s"recording activation '${activation.activationId}'", user.namespace.uuid) match {
           case Success(msg) => UserEvents.send(producer, msg)
-          case Failure(t)   => logging.warn(this, s"activation event was not sent: $t")
+          case Failure(t) => logging.warn(this, s"activation event was not sent: $t")
         }
       }
-//      activationStore.storeAfterCheck(activation, context)(transid, notifier = None)
+      //      activationStore.storeAfterCheck(activation, context)(transid, notifier = None)
       activationStore.storeAfterCheck(activation, false, None, None, context)(transid, notifier = None, logging)
       Right(activation)
     }
@@ -101,65 +101,83 @@ protected[actions] trait DagularActions {
 
   // AST nodes after slight decode
   private trait DagularAST
-  private case class DagularNode(data : String, children : Vector[DagularAST]) extends DagularAST // we're short on time...
-  private case class DagularLeaf(v : JsValue) extends DagularAST
+
+  private case class DagularNode(data: String, children: Vector[DagularAST]) extends DagularAST // we're short on time...
+
+  private case class DagularLeaf(v: JsValue) extends DagularAST
 
   private abstract class DagularValue {
     // this future will only finish once all the components of this DagularValue finish
-    def toJsValue () : Future[JsValue]
+    def toJsValue(): Future[JsValue]
   }
-  private case class DagularAtom(v : JsValue) extends DagularValue {
-    override def toJsValue () = Future { v }
+
+  private case class DagularAtom(v: JsValue) extends DagularValue {
+    override def toJsValue() = Future {
+      v
+    }
   }
-  private case class DagularArray(v : Vector[Future[DagularValue]]) extends DagularValue {
-    def toJsValue () = Future.sequence(v.map(_ flatMap {_.toJsValue()})) map {JsArray(_)}
+
+  private case class DagularArray(v: Vector[Future[DagularValue]]) extends DagularValue {
+    def toJsValue() = Future.sequence(v.map(_ flatMap {
+      _.toJsValue()
+    })) map {
+      JsArray(_)
+    }
   }
-  private case class DagularObject(v : Map[String, Future[DagularValue]]) extends DagularValue {
-    def toJsValue () = {
+
+  private case class DagularObject(v: Map[String, Future[DagularValue]]) extends DagularValue {
+    def toJsValue() = {
       val (ids, vals) = v.unzip
-      Future.sequence(vals.map(_ flatMap {_.toJsValue()})) map {v => JsObject(ids.zip(v).toMap)}
+      Future.sequence(vals.map(_ flatMap {
+        _.toJsValue()
+      })) map { v => JsObject(ids.zip(v).toMap) }
     }
   }
 
   private class DagularDSL(user: Identity, cause: Option[ActivationId])(implicit transid: TransactionId) {
 
-    def apply(code : String, dagInput : JsObject) : Future[JsValue] = {
+    def apply(code: String, dagInput: JsObject): Future[JsValue] = {
       System.out.println(s"OMG the dagular interpreter just got called")
 
       // prepare dagular program and initial environment
       val dagProg = parseDagular(code)
-      val dagEnv = Map[String, Future[DagularValue]] ("input" -> Future { DagularAtom(dagInput) })
+      val dagEnv = Map[String, Future[DagularValue]]("input" -> Future {
+        DagularAtom(dagInput)
+      })
 
-      interpretDagular(dagProg, dagEnv) flatMap {_.toJsValue()}
+      interpretDagular(dagProg, dagEnv) flatMap {
+        _.toJsValue()
+      }
     }
 
     // turn some dagular code into a more amenable internal representation
     // we expect to receive something parseable as JSON
-    private def parseDagular(code : String) : DagularAST = {
+    private def parseDagular(code: String): DagularAST = {
       val json = code.parseJson
       jsonToDagularAST(json)
     }
 
-    private def jsonToDagularAST(json : JsValue) : DagularAST = {
+    private def jsonToDagularAST(json: JsValue): DagularAST = {
       val JsObject(map) = json.asJsObject(s"dagular parse found non-object")
       val data = map.get("data") match {
         case Some(JsString(s)) => s
-        case Some(s)           => throw new IllegalArgumentException (s"dagular parse found non-string AST node name $s")
-        case None              => throw new IllegalArgumentException (s"dagular parse found object with missing data field")
+        case Some(s) => throw new IllegalArgumentException(s"dagular parse found non-string AST node name $s")
+        case None => throw new IllegalArgumentException(s"dagular parse found object with missing data field")
       }
       val children = map.get("children") match {
-        case Some(JsArray(s))  => s
-        case Some(s)           => throw new IllegalArgumentException (s"dagular parse found non-array in AST node children")
-        case None              => throw new IllegalArgumentException (s"dagular parse found object with missing children field")
+        case Some(JsArray(s)) => s
+        case Some(s) => throw new IllegalArgumentException(s"dagular parse found non-array in AST node children")
+        case None => throw new IllegalArgumentException(s"dagular parse found object with missing children field")
       }
 
-      def needs_children(data : String, count : Int, children : Vector[DagularAST]) : DagularAST = {
+      def needs_children(data: String, count: Int, children: Vector[DagularAST]): DagularAST = {
         if (children.length != count)
-          throw new IllegalArgumentException (s"dagular parse found ${children.length} children in ${data}: expected 3")
+          throw new IllegalArgumentException(s"dagular parse found ${children.length} children in ${data}: expected 3")
         else {
           DagularNode(data, children)
         }
       }
+
       System.out.println("data: " + data);
       // parse args and check arg counts
       data match {
@@ -211,7 +229,7 @@ protected[actions] trait DagularActions {
 
         case "unop" => { // [op, operand]
           if (children.length != 2)
-            throw new IllegalArgumentException (s"dagular parse found ${children.length} children in ${data}: expected 3")
+            throw new IllegalArgumentException(s"dagular parse found ${children.length} children in ${data}: expected 3")
           else {
             val op = DagularLeaf(children(0)) // for some reason lark produces a plain string here
             val operand = jsonToDagularAST(children(1))
@@ -221,7 +239,7 @@ protected[actions] trait DagularActions {
 
         case "binop" => { // [operand1, op, operand2]
           if (children.length != 3)
-            throw new IllegalArgumentException (s"dagular parse found ${children.length} children in ${data}: expected 3")
+            throw new IllegalArgumentException(s"dagular parse found ${children.length} children in ${data}: expected 3")
           else {
             val operand1 = jsonToDagularAST(children(0))
             val op = DagularLeaf(children(1)) // for some reason lark produces a plain string here
@@ -232,73 +250,85 @@ protected[actions] trait DagularActions {
 
         case "index" => { // [variable name, index]
           if (children.length != 2)
-            throw new IllegalArgumentException (s"dagular parse found ${children.length} children in ${data}: expected 2")
-          else {
-            val var_name = DagularLeaf(children(0))
-            val index = jsonToDagularAST(children(1))
-            DagularNode(data, Vector(var_name, index))
-          }
+            throw new IllegalArgumentException(s"dagular parse found ${children.length} children in index: expected 2")
+          // Properly parse *both* children into AST nodes:
+          val keyAst = jsonToDagularAST(children(0))
+          val indexAst = jsonToDagularAST(children(1))
+          DagularNode("index", Vector(keyAst, indexAst))
+
         }
 
         case "invocation" => { // [function name, argument]
           // it would be convenient to resolve functions at this location
-//          if (children.length != 3)
-//            throw new IllegalArgumentException (s"dagular parse found ${children.length} children in ${data}: expected 3")
-//          else {
-            val func_name = DagularLeaf(children(0))
-            val argument = jsonToDagularAST(children(1))
-            DagularNode(data, Vector(func_name, argument))
-//          }
+          //          if (children.length != 3)
+          //            throw new IllegalArgumentException (s"dagular parse found ${children.length} children in ${data}: expected 3")
+          //          else {
+          val func_name = DagularLeaf(children(0))
+          val argument = jsonToDagularAST(children(1))
+          DagularNode(data, Vector(func_name, argument))
+          //          }
         }
 
         case s => {
-          throw new IllegalArgumentException (s"dagular parse found unrecognized node name $s in AST node")
+          throw new IllegalArgumentException(s"dagular parse found unrecognized node name $s in AST node")
         }
       }
     }
 
-    private def mapAtom2(v1 : Future[DagularValue], v2 : Future[DagularValue], f : (DagularValue, DagularValue) => DagularValue) : Future[DagularValue] = {
+    private def mapAtom2(v1: Future[DagularValue], v2: Future[DagularValue], f: (DagularValue, DagularValue) => DagularValue): Future[DagularValue] = {
       for {
         left <- v1
         right <- v2
       } yield {
-        f (left, right)
+        f(left, right)
       }
     }
 
     // interpret some dagular code
     private def interpretDagular(
-                                  prog : DagularAST,
-                                  env : Map[String, Future[DagularValue]]) : Future[DagularValue] = {
+                                  prog: DagularAST,
+                                  env: Map[String, Future[DagularValue]]): Future[DagularValue] = {
 
       prog match {
         case DagularLeaf(v) => {
-          Future { DagularAtom(v) }
+          Future {
+            DagularAtom(v)
+          }
         }
         case DagularNode(data, children) => {
           data match {
             case "id" => { // [string]
               val DagularLeaf(JsString(s)) = children(0)
               if (s == "true")
-                Future { DagularAtom(JsBoolean(true)) }
+                Future {
+                  DagularAtom(JsBoolean(true))
+                }
               else if (s == "false")
-                Future { DagularAtom(JsBoolean(false)) }
+                Future {
+                  DagularAtom(JsBoolean(false))
+                }
               else
                 env(s)
             }
 
             case "number" => { // [number]
               val DagularLeaf(JsNumber(n)) = children(0)
-              Future { DagularAtom(JsNumber(n)) }
+              Future {
+                DagularAtom(JsNumber(n))
+              }
             }
 
             case "string" => { // [string]
               val DagularLeaf(JsString(s)) = children(0)
-              Future { DagularAtom(JsString(s)) }
+              Future {
+                DagularAtom(JsString(s))
+              }
             }
 
             case "list" => { // [expr1, expr2, ...]
-              Future { DagularArray(children map { child => interpretDagular(child, env) }) }
+              Future {
+                DagularArray(children map { child => interpretDagular(child, env) })
+              }
             }
 
             case "dict" => { // [pair1, pair2, ...]
@@ -318,7 +348,9 @@ protected[actions] trait DagularActions {
                 (id, value)
               })
 
-              Future { DagularObject(pairs.toMap) }
+              Future {
+                DagularObject(pairs.toMap)
+              }
             }
 
             case "unop" => { // [op, operand]
@@ -329,7 +361,7 @@ protected[actions] trait DagularActions {
                 case "not" =>
                   operand map {
                     _ match {
-                      case DagularAtom(JsBoolean(v)) => DagularAtom(JsBoolean(! v))
+                      case DagularAtom(JsBoolean(v)) => DagularAtom(JsBoolean(!v))
 
                       case _ => throw new IllegalArgumentException(s"dagular interpret got unexpected dagular non-atom in unop $op")
                     }
@@ -338,14 +370,14 @@ protected[actions] trait DagularActions {
                 case "-" =>
                   operand map {
                     _ match {
-                      case DagularAtom(JsNumber(v)) => DagularAtom(JsNumber(- v))
+                      case DagularAtom(JsNumber(v)) => DagularAtom(JsNumber(-v))
 
                       case _ => throw new IllegalArgumentException(s"dagular interpret got unexpected dagular non-atom in unop $op")
                     }
                   }
 
                 case s => {
-                  throw new IllegalArgumentException (s"dagular interpret found unrecognized unop $s")
+                  throw new IllegalArgumentException(s"dagular interpret found unrecognized unop $s")
                 }
               }
             }
@@ -485,7 +517,7 @@ protected[actions] trait DagularActions {
                 }
 
                 case s => {
-                  throw new IllegalArgumentException (s"dagular interpret found unrecognized binop $s")
+                  throw new IllegalArgumentException(s"dagular interpret found unrecognized binop $s")
                 }
               }
             }
@@ -497,7 +529,7 @@ protected[actions] trait DagularActions {
                     case DagularAtom(JsNumber(idx)) => DagularAtom(arr(idx.toIntExact))
 
                     case _ =>
-                      throw new IllegalArgumentException (s"dagular interpret attempted to index array with non-number")
+                      throw new IllegalArgumentException(s"dagular interpret attempted to index array with non-number")
                   }
 
                 case DagularAtom(JsObject(obj)) =>
@@ -505,18 +537,18 @@ protected[actions] trait DagularActions {
                     case DagularAtom(JsString(idx)) => DagularAtom(obj(idx))
 
                     case _ =>
-                      throw new IllegalArgumentException (s"dagular interpret attempted to index object with non-string")
+                      throw new IllegalArgumentException(s"dagular interpret attempted to index object with non-string")
                   }
 
                 case DagularAtom(_) =>
-                  throw new IllegalArgumentException (s"dagular interpret found atomic as indexing argument")
+                  throw new IllegalArgumentException(s"dagular interpret found atomic as indexing argument")
 
                 case DagularArray(arr) =>
                   interpretDagular(children(1), env) flatMap {
                     case DagularAtom(JsNumber(idx)) => arr(idx.toIntExact)
 
                     case _ =>
-                      throw new IllegalArgumentException (s"dagular interpret attempted to index array with non-number")
+                      throw new IllegalArgumentException(s"dagular interpret attempted to index array with non-number")
                   }
 
                 case DagularObject(obj) =>
@@ -524,7 +556,7 @@ protected[actions] trait DagularActions {
                     case DagularAtom(JsString(idx)) => obj(idx)
 
                     case _ =>
-                      throw new IllegalArgumentException (s"dagular interpret attempted to index object with non-string")
+                      throw new IllegalArgumentException(s"dagular interpret attempted to index object with non-string")
                   }
               }
             }
@@ -539,16 +571,22 @@ protected[actions] trait DagularActions {
 
               arg flatMap {
                 case DagularAtom(JsObject(arg)) =>
-                  interpretInvocation(func_name, JsObject(arg)) map { DagularAtom(_) }
+                  interpretInvocation(func_name, JsObject(arg)) map {
+                    DagularAtom(_)
+                  }
 
                 case DagularAtom(_) =>
-                  throw new IllegalArgumentException (s"dagular interpret found non-object as function argument")
+                  throw new IllegalArgumentException(s"dagular interpret found non-object as function argument")
 
                 case DagularArray(_) =>
-                  throw new IllegalArgumentException (s"dagular interpret found array as function argument")
+                  throw new IllegalArgumentException(s"dagular interpret found array as function argument")
 
                 case DagularObject(arg) =>
-                  DagularObject(arg).toJsValue() flatMap { arg => interpretInvocation(func_name, arg.asJsObject) map {DagularAtom(_)}}
+                  DagularObject(arg).toJsValue() flatMap { arg =>
+                    interpretInvocation(func_name, arg.asJsObject) map {
+                      DagularAtom(_)
+                    }
+                  }
               }
             }
 
@@ -556,16 +594,20 @@ protected[actions] trait DagularActions {
               val DagularLeaf(JsString(id)) = children(0)
               interpretDagular(children(1), env) map {
                 case DagularAtom(JsArray(arr)) =>
-                  DagularArray(arr.map({ item => interpretDagular(children(2), env + (id -> Future { DagularAtom(item) })) }))
+                  DagularArray(arr.map({ item =>
+                    interpretDagular(children(2), env + (id -> Future {
+                      DagularAtom(item)
+                    }))
+                  }))
 
                 case DagularAtom(_) =>
-                  throw new IllegalArgumentException (s"dagular interpret found non-array as comprehension argument")
+                  throw new IllegalArgumentException(s"dagular interpret found non-array as comprehension argument")
 
                 case DagularArray(arr) =>
                   DagularArray(arr.map({ item => interpretDagular(children(2), env + (id -> item)) }))
 
                 case DagularObject(_) =>
-                  throw new IllegalArgumentException (s"dagular interpret found object as comprehension argument")
+                  throw new IllegalArgumentException(s"dagular interpret found object as comprehension argument")
               }
             }
 
@@ -592,20 +634,17 @@ protected[actions] trait DagularActions {
                 }
               }
             }
+            case "block_expr" => { // [assign1, assign2, ..., return]
+              // build up the new environment by pulling out each ‘assign id = expr’
+              val new_env = children.dropRight(1).foldRight(env) {
+                case (DagularNode("assign", Vector(
+                DagularNode("id", Vector(DagularLeaf(JsString(name)))),
+                exprNode)), curEnv) =>
+                  curEnv + (name -> interpretDagular(exprNode, curEnv))
 
-            case "block_expr" =>  { // [assign1, assign2, ..., return]
-              // interpret series of assignments
-
-              val new_env = children.dropRight(1).foldRight(env)({(node, env) => node match {
-                case DagularNode("assign", assign_children) =>  // [leaf, expr]
-                  val DagularLeaf(JsString(id)) = assign_children(0)
-                  env + (id -> interpretDagular(assign_children(1), env))
-
-                  case DagularNode(s, _)
-                  =>
-                  throw new IllegalArgumentException(s"dagular interpret found $s inside block")
-
-              }})
+                case (DagularNode(s, _), _) =>
+                  throw new IllegalArgumentException(s"dagular interpret found unexpected `$s` inside block")
+              }
 
               children.takeRight(1)(0) match {
                 case DagularNode("return", ret_children) => // [expr]
@@ -616,11 +655,11 @@ protected[actions] trait DagularActions {
             }
 
             case "return" | "assign" => {
-              throw new IllegalArgumentException (s"dagular interpret found $data in non-block")
+              throw new IllegalArgumentException(s"dagular interpret found $data in non-block")
             }
 
             case s => {
-              throw new IllegalArgumentException (s"dagular interpret found unrecognized node name $s")
+              throw new IllegalArgumentException(s"dagular interpret found unrecognized node name $s")
             }
           }
         }
@@ -628,7 +667,7 @@ protected[actions] trait DagularActions {
     }
 
     // call a serverless function and coerce result as JsObject
-    private def interpretInvocation(name : String, payload : JsObject) : Future[JsObject] = {
+    private def interpretInvocation(name: String, payload: JsObject): Future[JsObject] = {
       logging.info(this, s"dagular is invoking an action called $name")
 
       // this is what's done to resolve an action name
