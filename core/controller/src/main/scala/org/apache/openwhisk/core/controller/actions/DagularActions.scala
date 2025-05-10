@@ -1,8 +1,8 @@
 package org.apache.openwhisk.core.controller.actions
 
 import java.time.{Clock, Instant}
-
 import akka.actor.ActorSystem
+import com.github.benmanes.caffeine.cache.{Cache, Caffeine}
 import spray.json._
 import org.apache.openwhisk.common.{Logging, TransactionId, UserEvents}
 import org.apache.openwhisk.core.connector.{EventMessage, MessagingProvider}
@@ -12,6 +12,9 @@ import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.core.entity.types._
 import org.apache.openwhisk.spi.SpiLoader
 
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 import scala.collection._
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future}
@@ -41,6 +44,17 @@ protected[actions] trait DagularActions {
   /** Message producer. This is needed to write user-metrics. */
   private val messagingProvider = SpiLoader.get[MessagingProvider]
   private val producer = messagingProvider.getProducer(services.whiskConfig)
+
+  /**
+   * We key the cache by a fixed-length SHA-256 hash of the code, to
+   * reduce memory usage and support large programs.
+   */
+  private val dagAstCache: Cache[String, DagularAST] = Caffeine.newBuilder()
+    .maximumSize(500)                 // max 500 distinct programs
+    .expireAfterAccess(60, TimeUnit.MINUTES)    // evict if unused for 10 minutes
+    .recordStats()                    // enable statistics
+    .build[String, DagularAST]()     // key: codeHash, value: parsed AST
+
 
   /** A method that knows how to invoke a single primitive action. */
   protected[actions] def invokeAction(
@@ -139,6 +153,16 @@ protected[actions] trait DagularActions {
     def apply(code: String, dagInput: JsObject): Future[JsValue] = {
       System.out.println(s"OMG the dagular interpreter just got called")
 
+      // Measure without cache
+      val uncachedNs = measureUncachedParseTime(code)
+      println(s"Uncached parse: ${uncachedNs/1e6} ms")
+
+      // Measure with cache
+      val cachedNs = measureCachedParseTime(code)
+      println(s"Cached parse: ${cachedNs/1e6} ms")
+
+      println(dagAstCache.stats().toString)
+
       // prepare dagular program and initial environment
       val dagProg = parseDagular(code)
       val dagEnv = Map[String, Future[DagularValue]]("input" -> Future {
@@ -150,12 +174,31 @@ protected[actions] trait DagularActions {
       }
     }
 
-    // turn some dagular code into a more amenable internal representation
-    // we expect to receive something parseable as JSON
-    private def parseDagular(code: String): DagularAST = {
+    /** Uncached parse: JSON → AST */
+    private def parseDagularUncached(code: String): DagularAST = {
       val json = code.parseJson
       jsonToDagularAST(json)
     }
+
+    /**
+     * Compute the SHA-256 hash of the code string.
+     */
+    private def codeHash(code: String): String = {
+      val md = MessageDigest.getInstance("SHA-256")
+      val bytes = md.digest(code.getBytes(StandardCharsets.UTF_8))
+      bytes.map(b => f"${b & 0xff}%02x").mkString
+    }
+
+    /**
+     * Parse the Dagular JSON program, using a cache to avoid repeated work.
+     * The first invocation computes and stores the AST; subsequent calls
+     * for the same code hash hit the cache.
+     */
+    protected def parseDagular(code: String): DagularAST = {
+      val key = codeHash(code)
+      dagAstCache.get(key, _ => parseDagularUncached(code))
+    }
+
 
     private def jsonToDagularAST(json: JsValue): DagularAST = {
       val JsObject(map) = json.asJsObject(s"dagular parse found non-object")
@@ -707,6 +750,19 @@ protected[actions] trait DagularActions {
           }
         }
       }
+    }
+    /** Measure the time (nanoseconds) to parse without cache. */
+    def measureUncachedParseTime(code: String): Long = {
+      val t0 = System.nanoTime()
+      parseDagularUncached(code)
+      System.nanoTime() - t0
+    }
+
+    /** Measure the time (nanoseconds) to parse th cache. */
+    def measureCachedParseTime(code: String): Long = {
+    val t0 = System.nanoTime()
+      parseDagular(code)
+      System.nanoTime() - t0
     }
   }
 }
