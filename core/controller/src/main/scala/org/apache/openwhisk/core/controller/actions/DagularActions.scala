@@ -50,10 +50,10 @@ protected[actions] trait DagularActions {
    * reduce memory usage and support large programs.
    */
   private val dagAstCache: Cache[String, DagularAST] = Caffeine.newBuilder()
-    .maximumSize(500)                 // max 500 distinct programs
-    .expireAfterAccess(60, TimeUnit.MINUTES)    // evict if unused for 10 minutes
-    .recordStats()                    // enable statistics
-    .build[String, DagularAST]()     // key: codeHash, value: parsed AST
+    .maximumSize(500) // max 500 distinct programs
+    .expireAfterAccess(60, TimeUnit.MINUTES) // evict if unused for 10 minutes
+    .recordStats() // enable statistics
+    .build[String, DagularAST]() // key: codeHash, value: parsed AST
 
 
   /** A method that knows how to invoke a single primitive action. */
@@ -120,6 +120,11 @@ protected[actions] trait DagularActions {
 
   private case class DagularLeaf(v: JsValue) extends DagularAST
 
+  // ─── new AST nodes ───────────────────────────────────────────────────────────────
+  private case class DagularLambda(param: String, body: DagularAST) extends DagularAST
+
+  private case class DagularApply(fn: DagularAST, args: Vector[DagularAST]) extends DagularAST
+
   private abstract class DagularValue {
     // this future will only finish once all the components of this DagularValue finish
     def toJsValue(): Future[JsValue]
@@ -148,6 +153,9 @@ protected[actions] trait DagularActions {
     }
   }
 
+
+
+
   private class DagularDSL(user: Identity, cause: Option[ActivationId])(implicit transid: TransactionId) {
 
     def apply(code: String, dagInput: JsObject): Future[JsValue] = {
@@ -155,11 +163,11 @@ protected[actions] trait DagularActions {
 
       // Measure without cache
       val uncachedNs = measureUncachedParseTime(code)
-      println(s"Uncached parse: ${uncachedNs/1e6} ms")
+      println(s"Uncached parse: ${uncachedNs / 1e6} ms")
 
       // Measure with cache
       val cachedNs = measureCachedParseTime(code)
-      println(s"Cached parse: ${cachedNs/1e6} ms")
+      println(s"Cached parse: ${cachedNs / 1e6} ms")
 
       println(dagAstCache.stats().toString)
 
@@ -197,6 +205,24 @@ protected[actions] trait DagularActions {
     protected def parseDagular(code: String): DagularAST = {
       val key = codeHash(code)
       dagAstCache.get(key, _ => parseDagularUncached(code))
+    }
+
+    // ─── new closure representation ─────────────────────────────────────────────────
+    private case class DagularClosure(
+                                       param: String,
+                                       body: DagularAST,
+                                       env: Map[String, Future[DagularValue]]
+                                     )(implicit ec: ExecutionContext)
+      extends DagularValue {
+      override def toJsValue() =
+        Future.failed(new IllegalStateException("Cannot convert closure to JsValue"))
+
+      /** apply this closure to one argument, returning the result (or a new closure) */
+      def applyArg(argVal: DagularValue): Future[DagularValue] = {
+        // extend the saved env, then re-interpret the body
+        val newEnv = env + (param -> Future.successful(argVal))
+        interpretDagular(body, newEnv)
+      }
     }
 
 
@@ -312,6 +338,19 @@ protected[actions] trait DagularActions {
           //          }
         }
 
+        case "lambda" => // [ paramName, bodyAST ]
+          require(children.size == 2, "lambda expects exactly 2 children")
+          val JsString(param) = children(0)
+          val bodyAst = jsonToDagularAST(children(1))
+          DagularLambda(param, bodyAst)
+
+        case "apply" => // [ fnAST, arg1AST, arg2AST, … ]
+          require(children.size >= 2, "apply expects fn + ≥1 arguments")
+          val fnAst = jsonToDagularAST(children(0))
+          val argAsts = children.drop(1).map(jsonToDagularAST)
+          DagularApply(fnAst, argAsts)
+
+
         case s => {
           throw new IllegalArgumentException(s"dagular parse found unrecognized node name $s in AST node")
         }
@@ -338,6 +377,7 @@ protected[actions] trait DagularActions {
             DagularAtom(v)
           }
         }
+
         case DagularNode(data, children) => {
           data match {
             case "id" => { // [string]
@@ -679,14 +719,14 @@ protected[actions] trait DagularActions {
             }
             case "block_expr" => { // [assign1, assign2, ..., return]
               // build up the new environment by pulling out each ‘assign id = expr’
-              val new_env = children.dropRight(1).foldRight(env) {
-                case (DagularNode("assign", Vector(
+              val new_env = children.dropRight(1).foldLeft(env) {
+                case (curEnv, DagularNode("assign", Vector(
                 DagularNode("id", Vector(DagularLeaf(JsString(name)))),
-                exprNode)), curEnv) =>
+                exprNode))) =>
                   curEnv + (name -> interpretDagular(exprNode, curEnv))
 
-                case (DagularNode(s, _), _) =>
-                  throw new IllegalArgumentException(s"dagular interpret found unexpected `$s` inside block")
+                case (_, unexpected) =>
+                  throw new IllegalArgumentException(s"Unexpected node in block_expr: $unexpected")
               }
 
               children.takeRight(1)(0) match {
@@ -704,6 +744,31 @@ protected[actions] trait DagularActions {
             case s => {
               throw new IllegalArgumentException(s"dagular interpret found unrecognized node name $s")
             }
+          }
+        }
+
+        case DagularLambda(param, body) => {
+          // capture the current env in a closure
+          Future.successful(DagularClosure(param, body, env))
+          }
+
+        case DagularApply(fnAst, argAsts) => {
+          // fully curried: apply each arg in sequence
+          interpretDagular(fnAst, env).flatMap {
+            case clo: DagularClosure =>
+              argAsts.foldLeft(Future.successful[DagularValue](clo)) {
+                (fval, nextArgAst) =>
+                  fval.flatMap {
+                    case closure: DagularClosure =>
+                      interpretDagular(nextArgAst, env).flatMap { argVal =>
+                        closure.applyArg(argVal)
+                      }
+                    case other =>
+                      Future.failed(new IllegalArgumentException(s"apply on non-closure: $other"))
+                  }
+              }
+            case other =>
+              Future.failed(new IllegalArgumentException(s"apply on non-closure: $other"))
           }
         }
       }
@@ -751,6 +816,7 @@ protected[actions] trait DagularActions {
         }
       }
     }
+
     /** Measure the time (nanoseconds) to parse without cache. */
     def measureUncachedParseTime(code: String): Long = {
       val t0 = System.nanoTime()
@@ -760,7 +826,7 @@ protected[actions] trait DagularActions {
 
     /** Measure the time (nanoseconds) to parse th cache. */
     def measureCachedParseTime(code: String): Long = {
-    val t0 = System.nanoTime()
+      val t0 = System.nanoTime()
       parseDagular(code)
       System.nanoTime() - t0
     }
