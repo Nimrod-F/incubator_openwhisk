@@ -154,8 +154,6 @@ protected[actions] trait DagularActions {
   }
 
 
-
-
   private class DagularDSL(user: Identity, cause: Option[ActivationId])(implicit transid: TransactionId) {
 
     def apply(code: String, dagInput: JsObject): Future[JsValue] = {
@@ -173,9 +171,15 @@ protected[actions] trait DagularActions {
 
       // prepare dagular program and initial environment
       val dagProg = parseDagular(code)
-      val dagEnv = Map[String, Future[DagularValue]]("input" -> Future {
-        DagularAtom(dagInput)
-      })
+
+      // prepare dagular program and initial environment:
+      //  1) bind each top‐level field from --param foo=… as its own var
+      //  2) also keep the full object under "input"
+      val paramBindings: Map[String, Future[DagularValue]] =
+        dagInput.fields.map { case (k, v) => k -> Future.successful(DagularAtom(v)) }
+      val dagEnv = paramBindings + (
+        "input" -> Future.successful(DagularAtom(dagInput))
+        )
 
       interpretDagular(dagProg, dagEnv) flatMap {
         _.toJsValue()
@@ -750,7 +754,7 @@ protected[actions] trait DagularActions {
         case DagularLambda(param, body) => {
           // capture the current env in a closure
           Future.successful(DagularClosure(param, body, env))
-          }
+        }
 
         case DagularApply(fnAst, argAsts) => {
           // fully curried: apply each arg in sequence
