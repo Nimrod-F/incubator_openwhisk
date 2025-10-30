@@ -87,7 +87,11 @@ protected[actions] trait DagularActions {
     val end = Instant.now(Clock.systemUTC())
 
     // create the whisk activation for the final result
-    result map { result =>
+    result map { rawResult =>
+      val result: JsValue = rawResult match {
+        case _: JsObject => rawResult
+        case other => JsObject("value" -> other)
+      }
       val activation = WhiskActivation(
         namespace = user.namespace.name.toPath,
         name = action.name,
@@ -721,23 +725,33 @@ protected[actions] trait DagularActions {
                 }
               }
             }
-            case "block_expr" => { // [assign1, assign2, ..., return]
-              // build up the new environment by pulling out each ‘assign id = expr’
-              val new_env = children.dropRight(1).foldLeft(env) {
-                case (curEnv, DagularNode("assign", Vector(
-                DagularNode("id", Vector(DagularLeaf(JsString(name)))),
-                exprNode))) =>
-                  curEnv + (name -> interpretDagular(exprNode, curEnv))
+            case "block_expr" => { // [statements...]
+              var currentEnv = env
+              var earlyReturn: Option[Future[DagularValue]] = None
+              val sideEffectFutures = scala.collection.mutable.ListBuffer.empty[Future[DagularValue]]
 
-                case (_, unexpected) =>
-                  throw new IllegalArgumentException(s"Unexpected node in block_expr: $unexpected")
+              children.foreach { child =>
+                if (earlyReturn.isEmpty) {
+                  child match {
+                    // assignment: extend env (lazy future retained for potential later reads)
+                    case DagularNode("assign", Vector(
+                      DagularNode("id", Vector(DagularLeaf(JsString(name)))), exprAst)) =>
+                      currentEnv = currentEnv + (name -> interpretDagular(exprAst, currentEnv))
+
+                    // explicit return: capture future and short-circuit further statement processing
+                    case DagularNode("return", Vector(retAst)) =>
+                      earlyReturn = Some(interpretDagular(retAst, currentEnv))
+
+                    // any other expression: interpret for side effects, discard value but ensure completion before block ends
+                    case otherAst =>
+                      sideEffectFutures += interpretDagular(otherAst, currentEnv)
+                  }
+                }
               }
 
-              children.takeRight(1)(0) match {
-                case DagularNode("return", ret_children) => // [expr]
-                  interpretDagular(ret_children(0), new_env)
-                case DagularNode(s, _) =>
-                  throw new IllegalArgumentException(s"dagular interpret found non-return $s at block end")
+              earlyReturn.getOrElse {
+                // wait for all side-effect expressions to finish, then yield empty object
+                Future.sequence(sideEffectFutures.toList).map { _ => DagularAtom(JsObject.empty) }
               }
             }
 
